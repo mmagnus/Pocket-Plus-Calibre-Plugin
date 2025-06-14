@@ -61,7 +61,7 @@ __version__ = '2.7.7'
 TAGS = [] # [] or ['tag1', 'tag2']
 TAGS_EXCEPTIONS = [] # [] or ['tag3', 'tag4']
 URL_KEYWORD_EXCEPTIONS = [] # [] or ['keyword1', 'keyword2']
-SECTIONS_BY_DOMAIN = False
+SECTIONS_BY_DOMAIN = True
 INCLUDE_UNTAGGED = True
 ARCHIVE_DOWNLOADED = False
 MAX_ARTICLES = 300
@@ -72,6 +72,9 @@ TO_PULL = 'unread'
 TITLE_WITH_TAGS = False
 ALLOW_DUPLICATES = True
 USE_GLOBAL_CONFIG = False
+
+TODOIST_PROJECT_ID = 'XXX' # your Todoist project ID
+TODOIST_API_KEY='XXXXX'
 # ADV CONFIGURATION #########################################################
 SITE_PACKAGE_PATH = ''
 #############################################################################
@@ -99,13 +102,9 @@ if SECTIONS_BY_DOMAIN:
 
 import errno
 import json
+import re
 import mechanize
-import operator
-
-try:
-        from urllib.error import HTTPError
-except ImportError:
-        from urllib2 import HTTPError
+from datetime import datetime
 
 __license__ = 'GPL v3'
 __copyright__ = '2019, David Orchard'
@@ -179,6 +178,9 @@ class Pocket(BasicNewsRecipe):
         sort_method = SORT_METHOD
         to_pull = TO_PULL
 
+        todoist_project_id =TODOIST_PROJECT_ID
+        todoist_api_key = TODOIST_API_KEY
+
         publication_type = 'magazine'
         title = "Pocket"
         # timefmt = '' # uncomment to remove date from the filenames, if commented then you will get something like `Pocket [Wed, 13 May 2020]`
@@ -213,55 +215,10 @@ class Pocket(BasicNewsRecipe):
                         tags_title = ':' + ' '.join(tagsList).upper() + ' '
 
         def first_run(self):
-                request = mechanize.Request("https://getpocket.com/v3/oauth/request",
-                                (u'{{'
-                                        '"consumer_key":"{0}",'
-                                        '"redirect_uri":"{1}"'
-                                '}}').format(
-                                        self.consumer_key,
-                                        self.redirect_uri
-                                ),
-                                headers = {
-                                        'Content-Type': 'application/json; charset=UTF8',
-                                        'X-Accept': 'application/json'
-                                }
-                        )
-                response = self.browser.open(request)
-                response = json.load(response)
-                self.config = PocketConfig(
-                                state = PocketConfig.AuthState.Authorizing,
-                                token = response['code']
-                )
+                pass
 
         def authorize(self):
-                assert self.config.state == PocketConfig.AuthState.Authorizing, "Authorization process not yet begun"
-                assert self.config.token, "No request token"
-                request = mechanize.Request("https://getpocket.com/v3/oauth/authorize",
-                                (u'{{'
-                                        '"consumer_key":"{0}",'
-                                        '"code":"{1}"'
-                                '}}').format(
-                                        self.consumer_key,
-                                        self.config.token
-                                ),
-                                headers = {
-                                        'Content-Type': 'application/json; charset=UTF8',
-                                        'X-Accept': 'application/json'
-                                }
-                        )
-                try:
-                        response = self.browser.open(request)
-                        response = json.load(response)
-                        self.config = PocketConfig(
-                                        state = PocketConfig.AuthState.Authorized,
-                                        token = response["access_token"],
-                                        user = response["username"],
-                        )
-                except HTTPError as e:
-                        if e.code == 403:
-                                # The code has already been used, or the user denied access
-                                self.reauthorize()
-                        raise e
+                pass
 
         def parse_index(self):
                 assert self.config.state == PocketConfig.AuthState.Authorized, "Not yet authorized"
@@ -271,59 +228,50 @@ class Pocket(BasicNewsRecipe):
                 section_dict = {} #dictionary with the sections and its articles. the sections
                                     #cant be domains or tags depending on SECTIONS_BY_DOMAIN
 
-                ############ GET ALL ITEMS #############
-                # get every item and iterate them. Build the section_dict
-                # with tags or domains as keys, depending on SECTIONS_BY_DOMAIN
-                request = mechanize.Request("https://getpocket.com/v3/get",
-                                        (u'{{'
-                                                '"consumer_key":"{0}",'
-                                                '"access_token":"{1}",'
-                                                '"count":"{2}",'
-                                                '"since":"{3}",'
-                                                '"state":"{5}",'
-                                                '"detailType":"complete",'
-                                                '"sort":"{4}"' '}}').format(
-                                                self.consumer_key,
-                                                self.config.token,
-                                                self.max_articles,
-                                                int(time()) - 86400 * self.oldest_article,
-                                                self.sort_method, 
-                                                self.to_pull,
-                                        ),
-                                        headers = {
-                                                'Content-Type': 'application/json; charset=UTF8',
-                                                'X-Accept': 'application/json'
-                                        }
-                                )
 
-                try:
-                    response = self.browser.open(request)
-                    response = json.load(response)
-                except HTTPError as e:
-                    if e.code == 401:
-                        # Calibre access has been removed
-                        self.reauthorize()
-                        raise e
-                    elif e.code == 413:
-                        self.log.exception('Pocket API responded with 413, try with a lower MAX_ARTICLES value ')
-                        return False
+                url = f"https://api.todoist.com/rest/v2/tasks?project_id={self.todoist_project_id}"
+                headers = {"Authorization": f"Bearer {self.todoist_api_key}"}
+                request = mechanize.Request(url, headers=headers);
+                
+                
+                print("llega1")
+                response = self.browser.open(request)
+                if response.code != 200:
+                        raise Exception("No se pudieron recuperar las tareas de Todoist")
+                data = response.read().decode("utf-8")
+                tasks = json.loads(data)
+                articles_todoist = []
+                print("llega2")
+                
+                url_regex = re.compile(r'\[([^\]]+)\]\(\s*(https?://[^\s\)]+)\s*\)')
+                for task in tasks:
+                        match = url_regex.search(task['content'])
+                        if match:
+                                title = match.group(1).strip()
+                                url = match.group(2).strip()
+                                date_added = task.get('created_at', datetime.now().isoformat())
+                                articles_todoist.append({
+                                'title': title or url,
+                                'url': url,
+                                'date_added': date_added
+                                })
 
-                if not response['list']:
+
+                if not articles_todoist:
                     self.abort_recipe_processing('No unread articles in the Pocket account "{}"'.format(self.config.user))
                 else:
-                    for item in dict(response['list']):
-                        if response['list'][item]['status'] == '2':
-                            del response['list'][item]
+                    for item in articles_todoist:
+  
                         # If the URL contains any URL_KEYWORD_EXCEPTIONS, ignore article
-                        elif any(pattern in response['list'][item]['given_url'] for pattern in URL_KEYWORD_EXCEPTIONS):
-                            print("Ignoring article due to keyword patterns:" + response['list'][item]['given_url'])
-                            del response['list'][item]
+                        if any(pattern in item['url'] for pattern in URL_KEYWORD_EXCEPTIONS):
+                            print("Ignoring article due to keyword patterns:" + item['url'])
+                            del item
                         elif SECTIONS_BY_DOMAIN:
                             # the keys of section_dict will be domains
                             # Extract domain from the URL
-                            domain =  urlparse(response['list'][item]['resolved_url']).netloc.replace('www.', '')
+                            domain =  urlparse(item['url']).netloc.replace('www.', '')
 
-                            url = response['list'][item]['resolved_url']
+                            url = item['url']
                             print('>> url', url, file=sys.stderr)
                             print('>>> domain', domain, file=sys.stderr)                                
 
@@ -372,22 +320,18 @@ class Pocket(BasicNewsRecipe):
                         arts = []
                         for item in section_dict.get(section):
                             try:
-                                title = response['list'][item]['resolved_title']
+                                title = item['title']
                             except KeyError:
                                 title = 'error: title'
                             try:
-                                url =  response['list'][item]['resolved_url']
+                                url =  item['url']
                             except KeyError:
                                 url = 'error: url'
-                            try:
-                                desc = response['list'][item]['excerpt']
-                            except KeyError:
-                                desc = 'error: description'
+ 
                             arts.append({
                                         'title': title,
                                         'url': url,
-                                        'date': response['list'][item]['time_added'],
-                                        'description': desc,})
+                                        'date': item['date_added']})
 
                             if (
                                 self.archive_downloaded
